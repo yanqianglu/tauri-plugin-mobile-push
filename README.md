@@ -1,41 +1,74 @@
 # tauri-plugin-mobile-push
 
-Push notifications for Tauri v2 apps on iOS and Android.
+Push notifications for Tauri v2 apps on iOS (APNs) and Android (FCM).
 
-Uses **APNs** (Apple Push Notification service) on iOS and **FCM** (Firebase Cloud Messaging) on Android. Desktop platforms are a graceful no-op.
+[![Crates.io](https://img.shields.io/crates/v/tauri-plugin-mobile-push.svg)](https://crates.io/crates/tauri-plugin-mobile-push)
+[![npm](https://img.shields.io/npm/v/tauri-plugin-mobile-push-api.svg)](https://www.npmjs.com/package/tauri-plugin-mobile-push-api)
 
-> **Why not `tauri-plugin-notification`?** The official plugin only supports *local* notifications. This plugin handles **remote/server-sent push notifications** with native APNs and FCM integration.
+A Tauri v2 plugin that provides native remote push notification support using Apple Push Notification service (APNs) on iOS and Firebase Cloud Messaging (FCM) on Android. Unlike `tauri-plugin-notification` which only handles local notifications, this plugin handles **server-sent remote push notifications** -- the kind you need for chat apps, alerts, and any real-time engagement.
+
+The plugin uses **explicit AppDelegate delegation** instead of method swizzling, making it reliable, transparent, and compatible with iOS 26+ where swizzling-based approaches break.
+
+## Features
+
+- **APNs on iOS** -- native device token registration and push delivery
+- **FCM on Android** -- Firebase Cloud Messaging integration with automatic token management
+- **Foreground notifications** -- receive and display pushes while the app is open
+- **Notification tap handling** -- deep-link into your app when users tap a notification
+- **Token refresh events** -- stay in sync when the OS rotates device tokens
+- **No method swizzling** -- explicit delegation pattern that is debuggable and future-proof
+- **Desktop no-op** -- compiles on macOS/Windows/Linux without error; commands return `Err` at runtime so you can gate push logic behind platform checks
+- **TypeScript API** -- fully typed async functions and event listeners
 
 ## Platform Support
 
-| Platform | Token Source | Push Delivery |
-|----------|-------------|---------------|
-| iOS 13+ | APNs device token | APNs HTTP/2 |
-| Android 7+ (API 24) | FCM registration token | FCM HTTP v1 |
-| macOS / Windows / Linux | No-op (returns error) | N/A |
+| Platform | Push Token | Foreground Notifications | Notification Tap | Token Refresh |
+|----------|-----------|--------------------------|------------------|---------------|
+| iOS 13+  | APNs device token (hex) | Yes | Yes | Yes |
+| Android 7+ (API 24) | FCM registration token | Yes | Yes | Yes |
+| Desktop  | No-op (returns error) | N/A | N/A | N/A |
 
-On unsupported platforms the plugin registers without error, but commands return an `Err`.
+## Why This Plugin?
 
-## Install
+**The official `tauri-plugin-notification` only supports local notifications.** It cannot receive server-sent pushes. If you need to send notifications from your backend to your users' devices, you need this plugin.
+
+**Third-party alternatives use method swizzling**, which intercepts Objective-C method calls at runtime. This technique is fragile -- it breaks when multiple plugins swizzle the same methods, produces difficult-to-debug failures, and Apple has been deprecating the APIs that enable it. On iOS 26+, swizzling-based push plugins can silently fail.
+
+**This plugin uses explicit AppDelegate delegation.** You create a small `AppDelegate.swift` file that forwards APNs callbacks to the plugin via `NotificationCenter`. This approach is:
+
+- **Reliable** -- no hidden runtime magic that can silently break
+- **Debuggable** -- you can set breakpoints in the delegate methods and see exactly what happens
+- **Future-proof** -- uses standard Apple APIs that will not be deprecated
+- **Composable** -- works alongside any other plugins or libraries without conflicts
+
+## Installation
 
 ### Rust
 
-Add to your `src-tauri/Cargo.toml`:
+Add to `src-tauri/Cargo.toml`:
 
 ```toml
 [dependencies]
+# From crates.io
+tauri-plugin-mobile-push = "0.1"
+
+# Or from git
 tauri-plugin-mobile-push = { git = "https://github.com/yanqianglu/tauri-plugin-mobile-push" }
 ```
 
-### JavaScript
+### JavaScript / TypeScript
 
 ```bash
 npm install tauri-plugin-mobile-push-api
 # or
+pnpm add tauri-plugin-mobile-push-api
+# or
 bun add tauri-plugin-mobile-push-api
 ```
 
-### Permissions
+Requires `@tauri-apps/api` >= 2.0.0 as a peer dependency.
+
+### Capabilities
 
 Add to your capabilities file (e.g., `src-tauri/capabilities/mobile.json`):
 
@@ -45,25 +78,31 @@ Add to your capabilities file (e.g., `src-tauri/capabilities/mobile.json`):
 }
 ```
 
-### Register the Plugin
+This grants both `allow-request-permission` and `allow-get-token`.
+
+### Plugin Registration
 
 In `src-tauri/src/lib.rs`:
 
 ```rust
 tauri::Builder::default()
     .plugin(tauri_plugin_mobile_push::init())
-    // ...
+    // ... other plugins
+    .run(tauri::generate_context!())
+    .expect("error while running tauri application");
 ```
 
-## iOS Setup
+## Setup
 
-### 1. Enable Push Notifications Capability
+### iOS
+
+#### 1. Enable Push Notifications Capability
 
 In Xcode, select your target, go to **Signing & Capabilities**, and add the **Push Notifications** capability. This adds the `aps-environment` entitlement automatically.
 
-### 2. Create an AppDelegate
+#### 2. Create AppDelegate.swift
 
-The plugin does **not** use method swizzling. You must explicitly forward APNs callbacks to the plugin. Create `src-tauri/gen/apple/Sources/AppDelegate.swift`:
+Create the file at `src-tauri/gen/apple/Sources/AppDelegate.swift`. This file forwards APNs callbacks to the plugin -- it is required because the plugin does **not** use method swizzling.
 
 ```swift
 import SwiftUI
@@ -77,11 +116,15 @@ class AppDelegate: TauriAppDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
+        // Set self as the notification center delegate so foreground
+        // notifications and tap events are routed to this class.
         UNUserNotificationCenter.current().delegate = self
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
     }
 
-    // APNs token received — forward to plugin
+    // Called by iOS when APNs registration succeeds.
+    // Converts the raw token data to a hex string and posts it
+    // so the plugin can resolve the pending getToken() call.
     override func application(
         _ application: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
@@ -96,7 +139,7 @@ class AppDelegate: TauriAppDelegate {
         )
     }
 
-    // APNs registration failed
+    // Called by iOS when APNs registration fails.
     override func application(
         _ application: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
@@ -114,7 +157,8 @@ class AppDelegate: TauriAppDelegate {
 // MARK: - UNUserNotificationCenterDelegate
 
 extension AppDelegate: UNUserNotificationCenterDelegate {
-    // Foreground notification
+    // Called when a notification arrives while the app is in the foreground.
+    // Posts to the plugin and shows the notification as a banner.
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
@@ -130,7 +174,7 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
         completionHandler([.banner, .sound, .badge])
     }
 
-    // Notification tapped
+    // Called when the user taps a notification.
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
@@ -147,7 +191,7 @@ extension AppDelegate: UNUserNotificationCenterDelegate {
 }
 ```
 
-### 3. Entitlements
+#### 3. Entitlements
 
 Ensure your `.entitlements` file includes:
 
@@ -156,15 +200,15 @@ Ensure your `.entitlements` file includes:
 <string>development</string>
 ```
 
-Change to `production` for App Store / TestFlight builds. If you added the Push Notifications capability in Xcode, this is handled automatically.
+Change to `production` for App Store / TestFlight builds. If you added the Push Notifications capability via Xcode, this is handled automatically.
 
-## Android Setup
+### Android
 
-### 1. Add Firebase
+#### 1. Add Firebase
 
-1. Create a Firebase project and add your Android app.
+1. Create a Firebase project at [console.firebase.google.com](https://console.firebase.google.com/) and add your Android app.
 2. Download `google-services.json` and place it in `src-tauri/gen/android/app/`.
-3. Ensure your `build.gradle.kts` applies the Google Services plugin:
+3. Configure your Gradle files:
 
 ```kotlin
 // project-level build.gradle.kts
@@ -183,13 +227,13 @@ dependencies {
 }
 ```
 
-### 2. Register the FCM Service
+#### 2. Register the FCM Service
 
-Add to your `AndroidManifest.xml` inside `<application>`:
+Add to your `AndroidManifest.xml` inside the `<application>` tag:
 
 ```xml
 <service
-    android:name="app.tauri.plugin.mobile_push.FcmService"
+    android:name="app.tauri.mobilepush.FCMService"
     android:exported="false">
     <intent-filter>
         <action android:name="com.google.firebase.MESSAGING_EVENT" />
@@ -197,7 +241,37 @@ Add to your `AndroidManifest.xml` inside `<application>`:
 </service>
 ```
 
+This registers the plugin's `FCMService` which forwards incoming messages and token refreshes to the Tauri event system.
+
 ## Usage
+
+### Request Permission
+
+Shows the system permission dialog on iOS. On Android 13+ (API 33), requests the `POST_NOTIFICATIONS` runtime permission. Earlier Android versions return `{ granted: true }` immediately.
+
+```typescript
+import { requestPermission } from "tauri-plugin-mobile-push-api";
+
+const { granted } = await requestPermission();
+if (!granted) {
+  console.warn("Push notification permission denied");
+}
+```
+
+### Get Device Token
+
+Returns the APNs device token (hex string) on iOS or the FCM registration token on Android. On iOS, this triggers `registerForRemoteNotifications()` and resolves when the OS delivers the token via the AppDelegate.
+
+```typescript
+import { getToken } from "tauri-plugin-mobile-push-api";
+
+const token = await getToken();
+console.log("Device push token:", token);
+```
+
+### Complete Registration Flow
+
+The typical integration: request permission, get the token, and register it with your backend.
 
 ```typescript
 import {
@@ -208,10 +282,11 @@ import {
   onTokenRefresh,
 } from "tauri-plugin-mobile-push-api";
 
-// 1. Request permission (shows system dialog on iOS / Android 13+)
+// 1. Request permission
 const { granted } = await requestPermission();
 if (!granted) {
   console.warn("Push permission denied");
+  return;
 }
 
 // 2. Get the device push token
@@ -226,14 +301,14 @@ await fetch("https://your-api.com/push/register", {
 
 // 4. Listen for foreground notifications
 const unsubReceived = await onNotificationReceived((notification) => {
-  console.log("Notification received:", notification.title, notification.body);
+  console.log("Received:", notification.title, notification.body);
   console.log("Custom data:", notification.data);
 });
 
-// 5. Listen for notification taps (app opened from notification)
+// 5. Listen for notification taps (user opened app from notification)
 const unsubTapped = await onNotificationTapped((notification) => {
-  console.log("User tapped notification:", notification.data);
-  // Navigate to relevant screen based on notification.data
+  console.log("Tapped:", notification.data);
+  // Navigate to the relevant screen based on notification.data
 });
 
 // 6. Listen for token refreshes (re-register with your backend)
@@ -242,34 +317,109 @@ const unsubToken = await onTokenRefresh(({ token }) => {
   // Send new token to your backend
 });
 
-// Cleanup when done
+// Cleanup when your component unmounts
 unsubReceived.unregister();
 unsubTapped.unregister();
 unsubToken.unregister();
+```
+
+### Listen for Notification Taps
+
+When a user taps a notification, your app opens and the tap event fires with the notification payload. Use this to deep-link to the relevant screen.
+
+```typescript
+import { onNotificationTapped } from "tauri-plugin-mobile-push-api";
+
+const unsub = await onNotificationTapped((notification) => {
+  const { screen, id } = notification.data as { screen: string; id: string };
+  // Navigate based on the custom data in the push payload
+  navigateTo(screen, id);
+});
+```
+
+### Listen for Token Refresh
+
+The OS may rotate device tokens at any time. When this happens, send the new token to your backend.
+
+```typescript
+import { onTokenRefresh } from "tauri-plugin-mobile-push-api";
+
+const unsub = await onTokenRefresh(({ token }) => {
+  fetch("https://your-api.com/push/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+});
 ```
 
 ## API Reference
 
 ### Commands
 
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `requestPermission()` | `Promise<{ granted: boolean }>` | Request push notification permission |
-| `getToken()` | `Promise<string>` | Get the current APNs/FCM device token |
+#### `requestPermission()`
 
-### Event Listeners
+```typescript
+function requestPermission(): Promise<{ granted: boolean }>;
+```
 
-| Function | Event Payload | Description |
-|----------|--------------|-------------|
-| `onNotificationReceived(handler)` | `PushNotification` | Foreground notification received |
-| `onNotificationTapped(handler)` | `PushNotification` | User tapped a notification |
-| `onTokenRefresh(handler)` | `{ token: string }` | Device token was refreshed |
+Request push notification permission from the user.
+
+- **iOS**: Triggers the system permission dialog requesting `.alert`, `.badge`, and `.sound`.
+- **Android 13+**: Requests the `POST_NOTIFICATIONS` runtime permission.
+- **Android < 13**: Returns `{ granted: true }` immediately (no runtime permission needed).
+- **Desktop**: Returns an error.
+
+#### `getToken()`
+
+```typescript
+function getToken(): Promise<string>;
+```
+
+Get the current device push token.
+
+- **iOS**: Calls `UIApplication.shared.registerForRemoteNotifications()`, waits for the APNs callback, and returns the device token as a hex string.
+- **Android**: Calls `FirebaseMessaging.getInstance().token` and returns the FCM registration token.
+- **Desktop**: Returns an error.
+
+### Events
 
 All event listeners return `Promise<PluginListener>`. Call `.unregister()` on the returned listener to stop receiving events.
+
+#### `onNotificationReceived(handler)`
+
+```typescript
+function onNotificationReceived(
+  handler: (notification: PushNotification) => void,
+): Promise<PluginListener>;
+```
+
+Fires when a push notification arrives while the app is in the **foreground**. On iOS, the notification is also displayed as a banner (with sound and badge).
+
+#### `onNotificationTapped(handler)`
+
+```typescript
+function onNotificationTapped(
+  handler: (notification: PushNotification) => void,
+): Promise<PluginListener>;
+```
+
+Fires when the user **taps** a push notification to open the app. Use this for deep linking.
+
+#### `onTokenRefresh(handler)`
+
+```typescript
+function onTokenRefresh(
+  handler: (payload: { token: string }) => void,
+): Promise<PluginListener>;
+```
+
+Fires when the OS issues a new push token (APNs token refresh on iOS, FCM token rotation on Android). Send the new token to your backend whenever this fires.
 
 ### Types
 
 ```typescript
+/** Payload delivered with push notification events. */
 interface PushNotification {
   title?: string;
   body?: string;
@@ -279,22 +429,23 @@ interface PushNotification {
 }
 ```
 
-## Architecture
-
-This plugin takes an **explicit delegation** approach rather than using method swizzling or automatic configuration:
-
-- **No swizzling.** On iOS, you create an `AppDelegate` that explicitly forwards APNs callbacks to the plugin via `NotificationCenter`. This is more transparent, easier to debug, and avoids conflicts with other plugins or libraries that might also swizzle the same methods.
-- **No bundled Firebase SDK.** On Android, you add Firebase as a direct dependency of your app. The plugin provides a `FirebaseMessagingService` subclass that forwards tokens and messages to the Tauri event system.
-- **Desktop no-op.** On macOS, Windows, and Linux, the plugin registers without error so your code compiles on all targets. Commands return errors at runtime, letting you gate push logic behind platform checks.
-
 ## Sending Push Notifications from Your Server
 
-Once you have the device token, send pushes via:
+Once you have the device token, send pushes from your backend via:
 
 - **iOS (APNs):** Use the [APNs HTTP/2 API](https://developer.apple.com/documentation/usernotifications/sending-notification-requests-to-apns) with a `.p8` signing key or `.p12` certificate.
 - **Android (FCM):** Use the [FCM HTTP v1 API](https://firebase.google.com/docs/cloud-messaging/send-message) with a service account.
 
 The notification payload should include `title`, `body`, and any custom `data` fields your app needs. These will be delivered to your `onNotificationReceived` and `onNotificationTapped` handlers.
+
+## Architecture
+
+The plugin is structured as a standard Tauri v2 plugin with platform-specific native implementations:
+
+- **Rust core** (`src/`) -- plugin registration, command definitions, and a desktop no-op fallback
+- **Swift** (`ios/`) -- `MobilePushPlugin` receives APNs callbacks via `NotificationCenter` posts from your AppDelegate
+- **Kotlin** (`android/`) -- `MobilePushPlugin` wraps Firebase Messaging; `FCMService` extends `FirebaseMessagingService` to forward messages and token refreshes
+- **TypeScript** (`guest-js/`) -- thin async wrappers over `invoke()` and `addPluginListener()` from `@tauri-apps/api`
 
 ## License
 
