@@ -15,8 +15,3 @@ commands.allow = ["request_permission"]
 identifier = "allow-get-token"
 description = "Allows retrieving the push notification device token"
 commands.allow = ["get_token"]
-
-[[permission]]
-identifier = "allow-register-listener"
-description = "Allows registering event listeners for push notification events"
-commands.allow = ["register_listener"]

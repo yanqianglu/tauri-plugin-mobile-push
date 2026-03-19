@@ -6,6 +6,7 @@ Default permissions for the mobile-push plugin
 
 - `allow-request-permission`
 - `allow-get-token`
+- `allow-register-listener`
 
 ## Permission Table
 
@@ -38,6 +39,32 @@ Enables the get_token command without any pre-configured scope.
 <td>
 
 Denies the get_token command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-push:allow-register-listener`
+
+</td>
+<td>
+
+Enables the register_listener command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`mobile-push:deny-register-listener`
+
+</td>
+<td>
+
+Denies the register_listener command without any pre-configured scope.
 
 </td>
 </tr>
