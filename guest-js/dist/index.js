@@ -14,21 +14,21 @@ async function getToken() {
 }
 async function onNotificationReceived(handler) {
   return addPluginListener(
-    "plugin:mobile-push",
+    "mobile-push",
     "notification-received",
     handler
   );
 }
 async function onNotificationTapped(handler) {
   return addPluginListener(
-    "plugin:mobile-push",
+    "mobile-push",
     "notification-tapped",
     handler
   );
 }
 async function onTokenRefresh(handler) {
   return addPluginListener(
-    "plugin:mobile-push",
+    "mobile-push",
     "token-received",
     handler
   );

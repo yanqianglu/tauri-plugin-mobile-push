@@ -12,6 +12,7 @@ public class MobilePushPlugin: Plugin {
 
     override public func load(webview: WKWebView) {
         MobilePushPlugin.instance = self
+        print("[mobile-push] Plugin loaded, instance set")
     }
 
     // MARK: - Commands
@@ -29,10 +30,14 @@ public class MobilePushPlugin: Plugin {
     @objc public func getToken(_ invoke: Invoke) {
         // Store the invoke — it will be resolved when handleToken() is called
         // from the AppDelegate after registerForRemoteNotifications succeeds.
+        print("[mobile-push] getToken called, registering for remote notifications...")
         self.pendingTokenInvoke = invoke
 
         DispatchQueue.main.async {
-            UIApplication.shared.registerForRemoteNotifications()
+            let app = UIApplication.shared
+            print("[mobile-push] isRegisteredForRemoteNotifications: \(app.isRegisteredForRemoteNotifications)")
+            app.registerForRemoteNotifications()
+            print("[mobile-push] registerForRemoteNotifications() called")
         }
     }
 
@@ -41,11 +46,15 @@ public class MobilePushPlugin: Plugin {
     /// Called from AppDelegate's didRegisterForRemoteNotificationsWithDeviceToken.
     public func handleToken(_ token: Data) {
         let tokenString = token.map { String(format: "%02.2hhx", $0) }.joined()
+        print("[mobile-push] handleToken called: \(tokenString.prefix(16))...")
 
         // Resolve the pending getToken invoke if present
         if let invoke = self.pendingTokenInvoke {
+            print("[mobile-push] Resolving pending getToken invoke")
             invoke.resolve(["token": tokenString])
             self.pendingTokenInvoke = nil
+        } else {
+            print("[mobile-push] WARNING: handleToken called but no pending invoke")
         }
 
         // Also fire the event for listeners
@@ -54,9 +63,12 @@ public class MobilePushPlugin: Plugin {
 
     /// Called from AppDelegate's didFailToRegisterForRemoteNotificationsWithError.
     public func handleTokenError(_ error: Error) {
+        print("[mobile-push] handleTokenError: \(error.localizedDescription)")
         if let invoke = self.pendingTokenInvoke {
             invoke.reject(error.localizedDescription)
             self.pendingTokenInvoke = nil
+        } else {
+            print("[mobile-push] WARNING: handleTokenError called but no pending invoke")
         }
     }
 

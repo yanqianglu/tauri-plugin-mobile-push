@@ -54,7 +54,7 @@ export async function onNotificationReceived(
   handler: (notification: PushNotification) => void,
 ): Promise<PluginListener> {
   return addPluginListener(
-    "plugin:mobile-push",
+    "mobile-push",
     "notification-received",
     handler,
   );
@@ -67,7 +67,7 @@ export async function onNotificationTapped(
   handler: (notification: PushNotification) => void,
 ): Promise<PluginListener> {
   return addPluginListener(
-    "plugin:mobile-push",
+    "mobile-push",
     "notification-tapped",
     handler,
   );
@@ -82,7 +82,7 @@ export async function onTokenRefresh(
   handler: (payload: { token: string }) => void,
 ): Promise<PluginListener> {
   return addPluginListener(
-    "plugin:mobile-push",
+    "mobile-push",
     "token-received",
     handler,
   );
