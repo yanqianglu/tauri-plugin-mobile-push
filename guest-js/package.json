@@ -1,6 +1,6 @@
 {
   "name": "tauri-plugin-mobile-push-api",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "TypeScript API for tauri-plugin-mobile-push — push notifications for iOS (APNs) and Android (FCM)",
   "license": "(MIT OR Apache-2.0)",
   "repository": {

@@ -1,6 +1,6 @@
 [package]
 name = "tauri-plugin-mobile-push"
-version = "0.1.0"
+version = "0.1.3"
 description = "Tauri v2 plugin for push notifications on iOS (APNs) and Android (FCM)"
 authors = ["Yanqiang Lu"]
 license = "MIT OR Apache-2.0"

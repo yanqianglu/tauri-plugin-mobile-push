@@ -8,3 +8,4 @@ ios/.build/
 ios/.swiftpm/
 ios/Package.resolved
 node_modules/
+.npmrc
