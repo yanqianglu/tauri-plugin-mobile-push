@@ -1,8 +1,6 @@
 use serde::de::DeserializeOwned;
 use tauri::{plugin::PluginApi, AppHandle, Runtime};
 
-use crate::models::*;
-
 pub fn init<R: Runtime, C: DeserializeOwned>(
     app: &AppHandle<R>,
     _api: PluginApi<R, C>,
@@ -10,17 +8,6 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
     Ok(MobilePush(app.clone()))
 }
 
-/// Access to the mobile-push APIs.
+/// Plugin handle. Kept for Tauri's managed state requirement.
+/// Commands return stub values on desktop (push notifications are mobile-only).
 pub struct MobilePush<R: Runtime>(AppHandle<R>);
-
-impl<R: Runtime> MobilePush<R> {
-    pub fn request_permission(&self) -> crate::Result<PermissionResponse> {
-        Ok(PermissionResponse { granted: false })
-    }
-
-    pub fn get_token(&self) -> crate::Result<TokenResponse> {
-        Ok(TokenResponse {
-            token: String::new(),
-        })
-    }
-}

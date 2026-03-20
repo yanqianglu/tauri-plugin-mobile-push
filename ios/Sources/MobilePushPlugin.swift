@@ -2,22 +2,220 @@ import UIKit
 import WebKit
 import UserNotifications
 import Tauri
+import ObjectiveC
+
+// MARK: - Token Fetcher (thread-safe async token retrieval)
+
+/// Fetches an APNs device token by registering for remote notifications
+/// and blocking until the AppDelegate callback fires.
+private class TokenFetcher {
+    let semaphore = DispatchSemaphore(value: 0)
+    var token: String?
+    var error: String?
+
+    func resolve(_ tokenString: String) {
+        self.token = tokenString
+        semaphore.signal()
+    }
+
+    func reject(_ errorMessage: String) {
+        self.error = errorMessage
+        semaphore.signal()
+    }
+}
+
+/// The active token fetcher — set during getDeviceToken, read by AppDelegate callbacks.
+/// Access is serialized: only one getToken call can be in-flight at a time (guarded by tokenLock).
+private var activeTokenFetcher: TokenFetcher?
+private let tokenLock = NSLock()
+
+// MARK: - AppDelegate method injection
+
+/// Whether we've already injected APNs methods into the AppDelegate class.
+private var apnsDelegateSetUp = false
+
+/// UNUserNotificationCenter delegate for foreground notification handling.
+private class PushNotificationHandler: NSObject, UNUserNotificationCenterDelegate {
+    static let shared = PushNotificationHandler()
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        MobilePushPlugin.instance?.handleNotification(notification.request.content.userInfo)
+        completionHandler([.banner, .sound, .badge])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        MobilePushPlugin.instance?.handleNotificationTap(response.notification.request.content.userInfo)
+        completionHandler()
+    }
+}
+
+/// Injects APNs callback methods into the Tao-generated dynamic AppDelegate class
+/// and sets UNUserNotificationCenter.delegate for foreground notifications.
+/// Must be called on the main thread.
+private func setupApnsDelegateInternal() {
+    guard !apnsDelegateSetUp else { return }
+
+    guard let delegate = UIApplication.shared.delegate else {
+        NSLog("[mobile-push] setupApnsDelegate: no UIApplication.delegate found")
+        return
+    }
+
+    let cls: AnyClass = type(of: delegate)
+    NSLog("[mobile-push] Injecting APNs methods into %@", NSStringFromClass(cls))
+
+    // application:didRegisterForRemoteNotificationsWithDeviceToken:
+    let didRegisterSel = sel_registerName("application:didRegisterForRemoteNotificationsWithDeviceToken:")
+    let didRegisterBlock: @convention(block) (AnyObject, UIApplication, NSData) -> Void = { _, _, tokenNSData in
+        let tokenData = tokenNSData as Data
+        let tokenString = tokenData.map { String(format: "%02.2hhx", $0) }.joined()
+        NSLog("[mobile-push] APNs token received: %@...", String(tokenString.prefix(16)))
+        activeTokenFetcher?.resolve(tokenString)
+        MobilePushPlugin.instance?.handleToken(tokenData)
+    }
+    let didRegisterImp = imp_implementationWithBlock(didRegisterBlock as Any)
+    if class_addMethod(cls, didRegisterSel, didRegisterImp, "v@:@@") {
+        NSLog("[mobile-push] Added didRegisterForRemoteNotifications to AppDelegate")
+    } else {
+        NSLog("[mobile-push] didRegisterForRemoteNotifications already exists on AppDelegate")
+    }
+
+    // application:didFailToRegisterForRemoteNotificationsWithError:
+    let didFailSel = sel_registerName("application:didFailToRegisterForRemoteNotificationsWithError:")
+    let didFailBlock: @convention(block) (AnyObject, UIApplication, NSError) -> Void = { _, _, error in
+        NSLog("[mobile-push] APNs registration failed: %@", error.localizedDescription)
+        activeTokenFetcher?.reject(error.localizedDescription)
+        MobilePushPlugin.instance?.handleTokenError(error as Error)
+    }
+    let didFailImp = imp_implementationWithBlock(didFailBlock as Any)
+    if class_addMethod(cls, didFailSel, didFailImp, "v@:@@") {
+        NSLog("[mobile-push] Added didFailToRegisterForRemoteNotifications to AppDelegate")
+    } else {
+        NSLog("[mobile-push] didFailToRegisterForRemoteNotifications already exists on AppDelegate")
+    }
+
+    // Set UNUserNotificationCenter delegate for foreground handling + tap handling
+    UNUserNotificationCenter.current().delegate = PushNotificationHandler.shared
+    NSLog("[mobile-push] Set UNUserNotificationCenter.delegate")
+
+    apnsDelegateSetUp = true
+}
+
+// MARK: - Direct FFI functions (bypass PluginManager dispatch)
+
+/// Request notification permission. Blocks until the user responds (30s timeout).
+/// Returns 1 if granted, 0 if denied or error.
+@_cdecl("mobile_push_request_permission")
+func requestPermissionDirect() -> Int32 {
+    let sem = DispatchSemaphore(value: 0)
+    var granted = false
+
+    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { result, error in
+        if let error = error {
+            NSLog("[mobile-push] requestAuthorization error: %@", error.localizedDescription)
+        }
+        granted = result
+        sem.signal()
+    }
+
+    let result = sem.wait(timeout: .now() + 30)
+    if result == .timedOut {
+        NSLog("[mobile-push] requestAuthorization timed out")
+        return 0
+    }
+
+    NSLog("[mobile-push] Permission %@", granted ? "granted" : "denied")
+    return granted ? 1 : 0
+}
+
+/// Get the APNs device token. Blocks until the token is received or timeout.
+/// Writes the hex token string (null-terminated) to buffer.
+/// Returns: >0 = token length, -1 = error, -2 = timeout.
+@_cdecl("mobile_push_get_device_token")
+func getDeviceTokenDirect(_ buffer: UnsafeMutablePointer<CChar>, _ bufferLen: Int32, _ timeoutSecs: Int32) -> Int32 {
+    // Serialize concurrent calls
+    tokenLock.lock()
+    defer { tokenLock.unlock() }
+
+    // Ensure APNs delegate is set up
+    if !apnsDelegateSetUp {
+        if Thread.isMainThread {
+            setupApnsDelegateInternal()
+        } else {
+            DispatchQueue.main.sync {
+                setupApnsDelegateInternal()
+            }
+        }
+    }
+
+    let fetcher = TokenFetcher()
+    activeTokenFetcher = fetcher
+
+    // Register for remote notifications (must be on main thread)
+    DispatchQueue.main.async {
+        NSLog("[mobile-push] Calling registerForRemoteNotifications...")
+        UIApplication.shared.registerForRemoteNotifications()
+    }
+
+    // Wait for the token
+    let timeout = max(Int(timeoutSecs), 5)
+    let result = fetcher.semaphore.wait(timeout: .now() + .seconds(timeout))
+    activeTokenFetcher = nil
+
+    if result == .timedOut {
+        NSLog("[mobile-push] Token request timed out after %ds", timeout)
+        return -2
+    }
+
+    if let error = fetcher.error {
+        NSLog("[mobile-push] Token error: %@", error)
+        return -1
+    }
+
+    guard let token = fetcher.token else {
+        NSLog("[mobile-push] Token is nil after semaphore signal")
+        return -1
+    }
+
+    // Write token to buffer
+    let bytes = Array(token.utf8)
+    guard bytes.count < Int(bufferLen) else {
+        NSLog("[mobile-push] Token too long for buffer: %d >= %d", bytes.count, bufferLen)
+        return -1
+    }
+    for (i, b) in bytes.enumerated() {
+        buffer[i] = CChar(bitPattern: b)
+    }
+    buffer[bytes.count] = 0
+
+    NSLog("[mobile-push] Token (%d chars) written to buffer", bytes.count)
+    return Int32(bytes.count)
+}
+
+// MARK: - Plugin class (kept for event system + lifecycle)
 
 @objc(MobilePushPlugin)
 public class MobilePushPlugin: Plugin {
     public static var instance: MobilePushPlugin?
 
-    /// Pending getToken invoke — resolved when handleToken() is called from AppDelegate.
-    private var pendingTokenInvoke: Invoke?
-
     override public func load(webview: WKWebView) {
         MobilePushPlugin.instance = self
-        print("[mobile-push] Plugin loaded, instance set")
+        NSLog("[mobile-push] Plugin loaded (webview ready)")
     }
 
-    // MARK: - Commands
+    // MARK: - PluginManager command handlers (kept as fallback)
+    // These handle commands routed through run_mobile_plugin / PluginManager.
+    // Currently bypassed by the direct FFI functions above.
 
     @objc override public func requestPermissions(_ invoke: Invoke) {
+        NSLog("[mobile-push] requestPermissions via PluginManager")
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
             if let error = error {
                 invoke.reject(error.localizedDescription)
@@ -28,51 +226,25 @@ public class MobilePushPlugin: Plugin {
     }
 
     @objc public func getToken(_ invoke: Invoke) {
-        // Store the invoke — it will be resolved when handleToken() is called
-        // from the AppDelegate after registerForRemoteNotifications succeeds.
-        print("[mobile-push] getToken called, registering for remote notifications...")
-        self.pendingTokenInvoke = invoke
-
+        NSLog("[mobile-push] getToken via PluginManager")
         DispatchQueue.main.async {
-            let app = UIApplication.shared
-            print("[mobile-push] isRegisteredForRemoteNotifications: \(app.isRegisteredForRemoteNotifications)")
-            app.registerForRemoteNotifications()
-            print("[mobile-push] registerForRemoteNotifications() called")
+            UIApplication.shared.registerForRemoteNotifications()
         }
+        // Token arrives via handleToken() callback from AppDelegate
     }
 
-    // MARK: - AppDelegate callbacks
+    // MARK: - Callbacks from AppDelegate injection
 
-    /// Called from AppDelegate's didRegisterForRemoteNotificationsWithDeviceToken.
     public func handleToken(_ token: Data) {
         let tokenString = token.map { String(format: "%02.2hhx", $0) }.joined()
-        print("[mobile-push] handleToken called: \(tokenString.prefix(16))...")
-
-        // Resolve the pending getToken invoke if present
-        if let invoke = self.pendingTokenInvoke {
-            print("[mobile-push] Resolving pending getToken invoke")
-            invoke.resolve(["token": tokenString])
-            self.pendingTokenInvoke = nil
-        } else {
-            print("[mobile-push] WARNING: handleToken called but no pending invoke")
-        }
-
-        // Also fire the event for listeners
+        NSLog("[mobile-push] handleToken: %@...", String(tokenString.prefix(16)))
         self.trigger("token-received", data: ["token": tokenString])
     }
 
-    /// Called from AppDelegate's didFailToRegisterForRemoteNotificationsWithError.
     public func handleTokenError(_ error: Error) {
-        print("[mobile-push] handleTokenError: \(error.localizedDescription)")
-        if let invoke = self.pendingTokenInvoke {
-            invoke.reject(error.localizedDescription)
-            self.pendingTokenInvoke = nil
-        } else {
-            print("[mobile-push] WARNING: handleTokenError called but no pending invoke")
-        }
+        NSLog("[mobile-push] handleTokenError: %@", error.localizedDescription)
     }
 
-    /// Called from AppDelegate when a notification arrives in the foreground.
     public func handleNotification(_ userInfo: [AnyHashable: Any]) {
         var data: JSObject = [:]
         for (key, value) in userInfo {
@@ -86,7 +258,6 @@ public class MobilePushPlugin: Plugin {
         self.trigger("notification-received", data: data)
     }
 
-    /// Called when the user taps a notification.
     public func handleNotificationTap(_ userInfo: [AnyHashable: Any]) {
         var data: JSObject = [:]
         for (key, value) in userInfo {
@@ -101,7 +272,13 @@ public class MobilePushPlugin: Plugin {
     }
 }
 
+// MARK: - Plugin entry point
+
 @_cdecl("init_plugin_mobile_push")
 func initPlugin() -> Plugin {
+    // NOTE: Do NOT call setupApnsDelegateInternal() here.
+    // During plugin init, UIApplication.shared.delegate may not be set yet
+    // (Tao creates it dynamically and we run before didFinishLaunchingWithOptions completes).
+    // The delegate setup happens lazily on the first getDeviceToken call.
     return MobilePushPlugin()
 }
