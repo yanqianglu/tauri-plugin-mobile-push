@@ -34,7 +34,16 @@ private let tokenLock = NSLock()
 /// Whether we've already injected APNs methods into the AppDelegate class.
 private var apnsDelegateSetUp = false
 
+/// Configured foreground presentation options. Set via FFI at plugin init.
+/// Defaults to banner + list + sound + badge for back-compat with 0.1.3 and
+/// earlier, which hardcoded this behavior.
+private var configuredForegroundPresentation: UNNotificationPresentationOptions =
+    [.banner, .list, .sound, .badge]
+
 /// UNUserNotificationCenter delegate for foreground notification handling.
+/// `willPresent` fires only when the app is in the foreground; backgrounded
+/// and locked states bypass this delegate entirely and iOS shows the system
+/// banner natively.
 private class PushNotificationHandler: NSObject, UNUserNotificationCenterDelegate {
     static let shared = PushNotificationHandler()
 
@@ -43,15 +52,8 @@ private class PushNotificationHandler: NSObject, UNUserNotificationCenterDelegat
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        // willPresent only fires when the app is foreground. We suppress the
-        // banner/sound in that case — the user is looking at the app and would
-        // be surprised to see a system notification pop in while they interact.
-        // The notification event is still emitted to JS so in-app UI can react
-        // (e.g. increment an unread indicator on a different session).
-        // Backgrounded/locked states bypass this delegate entirely — iOS
-        // shows the system banner natively.
         MobilePushPlugin.instance?.handleNotification(notification.request.content.userInfo)
-        completionHandler([])
+        completionHandler(configuredForegroundPresentation)
     }
 
     func userNotificationCenter(
@@ -116,6 +118,17 @@ private func setupApnsDelegateInternal() {
 }
 
 // MARK: - Direct FFI functions (bypass PluginManager dispatch)
+
+/// Configure what iOS shows when a notification arrives while the app is
+/// foreground. `options` is the `UNNotificationPresentationOptions` bitmask
+/// assembled on the Rust side from `ForegroundPresentationOptions`.
+/// Called once from the Rust plugin setup after `register_ios_plugin`.
+@_cdecl("mobile_push_set_foreground_presentation")
+func setForegroundPresentation(_ options: UInt32) {
+    configuredForegroundPresentation =
+        UNNotificationPresentationOptions(rawValue: UInt(options))
+    NSLog("[mobile-push] Foreground presentation set: %u", options)
+}
 
 /// Request notification permission. Blocks until the user responds (30s timeout).
 /// Returns 1 if granted, 0 if denied or error.
