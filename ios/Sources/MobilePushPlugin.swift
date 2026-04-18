@@ -43,8 +43,15 @@ private class PushNotificationHandler: NSObject, UNUserNotificationCenterDelegat
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
+        // willPresent only fires when the app is foreground. We suppress the
+        // banner/sound in that case — the user is looking at the app and would
+        // be surprised to see a system notification pop in while they interact.
+        // The notification event is still emitted to JS so in-app UI can react
+        // (e.g. increment an unread indicator on a different session).
+        // Backgrounded/locked states bypass this delegate entirely — iOS
+        // shows the system banner natively.
         MobilePushPlugin.instance?.handleNotification(notification.request.content.userInfo)
-        completionHandler([.banner, .sound, .badge])
+        completionHandler([])
     }
 
     func userNotificationCenter(
