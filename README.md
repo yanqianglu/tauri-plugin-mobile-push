@@ -49,10 +49,15 @@ Add to `src-tauri/Cargo.toml`:
 
 ```toml
 [dependencies]
-tauri-plugin-mobile-push = { git = "https://github.com/yanqianglu/tauri-plugin-mobile-push" }
+tauri-plugin-mobile-push = "0.1"
 ```
 
-> The Rust crate is not yet published on crates.io. Use the git dependency for now.
+Or track the latest from git:
+
+```toml
+[dependencies]
+tauri-plugin-mobile-push = { git = "https://github.com/yanqianglu/tauri-plugin-mobile-push" }
+```
 
 ### JavaScript / TypeScript
 
@@ -89,6 +94,50 @@ tauri::Builder::default()
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
 ```
+
+#### Foreground presentation (iOS, optional)
+
+When a push arrives while the app is **foreground**, iOS asks the delegate
+what to present. The plugin's default is `banner + list + sound + badge`,
+which is right for reminder/alert-style apps. Chat-style apps where the
+notification content is already visible in-app usually want to suppress
+the banner instead:
+
+```rust
+use tauri_plugin_mobile_push::{Builder, ForegroundPresentationOptions};
+
+tauri::Builder::default()
+    .plugin(
+        Builder::new()
+            .ios_foreground_presentation(ForegroundPresentationOptions::silent())
+            .build(),
+    )
+    // ... other plugins
+    .run(tauri::generate_context!())
+    .expect("error while running tauri application");
+```
+
+Presets on `ForegroundPresentationOptions`:
+
+- `default()` -- `banner + list + sound + badge` (preserves pre-0.1.4 behavior)
+- `silent()` -- `list + badge` only (recommended for chat / messaging apps)
+- `none()` -- fully invisible (data-only push)
+
+Or set individual flags:
+
+```rust
+ForegroundPresentationOptions {
+    banner: false,
+    list: true,
+    sound: false,
+    badge: true,
+}
+```
+
+This only affects foreground behavior on iOS. When the app is backgrounded
+or the phone is locked, iOS bypasses the delegate entirely and shows the
+notification natively. Android follows FCM's standard behavior (banner
+when backgrounded, silent in-app when foreground).
 
 ## Setup
 
@@ -344,7 +393,6 @@ Thin async wrappers over `invoke()` and `addPluginListener()` from `@tauri-apps/
 
 - **iOS event listeners are not yet functional.** `onNotificationReceived`, `onNotificationTapped`, and `onTokenRefresh` register successfully but do not deliver events on iOS. This is because the Tauri `PluginManager` dispatch issue also affects the plugin's `trigger()` method for emitting events to the webview. The commands (`requestPermission`, `getToken`) work correctly via the direct FFI path. A future release will route iOS events through `AppHandle.emit()` to bypass the `PluginManager`.
 - **Android event listeners work as expected.** The standard Tauri plugin dispatch functions correctly on Android.
-- **Not published on crates.io yet.** Use a git dependency in `Cargo.toml` for now.
 
 ## License
 
